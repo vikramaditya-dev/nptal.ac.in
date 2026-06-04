@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block title %}Dashboard – SmartPrep AI{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1>📋 Certificates</h1>
+  <a href="{{ url_for('add_certificate') }}" class="btn btn-primary">+ Add Certificate</a>
+</div>
+
+<div class="card">
+  {% if certs %}
+  <table>
+    <thead>
+      <tr>
+        <th>Cert ID</th>
+        <th>Student</th>
+        <th>Course</th>
+        <th>Score</th>
+        <th>Issue Date</th>
+        <th>QR Code</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+
+    <tbody>
+      {% for c in certs %}
+      <tr>
+        <td><span class="badge">{{ c.certificate_id }}</span></td>
+        <td>{{ c.student_name }}</td>
+        <td>{{ c.course_name }}</td>
+        <td>{{ c.score }}</td>
+        <td>{{ c.issue_date }}</td>
+
+        <td>
+          <a href="{{ url_for('static', filename='qr/' ~ c.certificate_id ~ '.png') }}" target="_blank">
+            <img class="qr-thumb"
+                 src="{{ url_for('static', filename='qr/' ~ c.certificate_id ~ '.png') }}"
+                 alt="QR" />
+          </a>
+        </td>
+
+        <td>
+          <!-- VIEW -->
+          <a href="{{ url_for('view_certificate', certificate_id=c.certificate_id) }}"
+             target="_blank" class="btn btn-accent btn-sm">
+            View
+          </a>
+
+          <!-- DOWNLOAD QR -->
+          <a href="{{ url_for('static', filename='qr/' ~ c.certificate_id ~ '.png') }}"
+             download class="btn btn-secondary btn-sm">
+            QR
+          </a>
+
+          <!-- DELETE -->
+          <form action="{{ url_for('delete_certificate', certificate_id=c.certificate_id) }}"
+                method="POST"
+                style="display:inline;"
+                onsubmit="return confirm('Delete this certificate permanently?');">
+
+            <button type="submit" class="btn btn-danger btn-sm">
+              Delete
+            </button>
+          </form>
+
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+
+  </table>
+  {% else %}
+  <p style="text-align:center; padding:2rem;">No certificates found.</p>
+  {% endif %}
+</div>
+{% endblock %}
