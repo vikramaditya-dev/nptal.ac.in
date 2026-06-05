@@ -16,27 +16,7 @@
       font-family: 'Segoe UI', system-ui, sans-serif;
     }
 
-    .verify-strip {
-      position: fixed;
-      top: 0; left: 0; right: 0;
-      background: #1a237e;
-      color: #c5cae9;
-      font-size: .75rem;
-      text-align: center;
-      padding: .4rem 1rem;
-      letter-spacing: .4px;
-      z-index: 10;
-    }
-    .verify-strip strong { color: #fff; }
-    .valid-dot {
-      display: inline-block;
-      width: 8px; height: 8px;
-      background: #69f0ae;
-      border-radius: 50%;
-      margin-right: 5px;
-      vertical-align: middle;
-    }
-
+    
     .cert-wrapper {
       margin-top: 38px;
       width: 100%;
@@ -94,12 +74,7 @@
 </head>
 <body>
 
-<div class="verify-strip">
-  <span class="valid-dot"></span>
-  <strong>VERIFIED</strong> &nbsp;|&nbsp;
-  {{ cert.student_name }} &nbsp;·&nbsp; {{ cert.course_name }} &nbsp;·&nbsp;
-  Issued: {{ cert.issue_date }} &nbsp;·&nbsp; ID: <strong>{{ cert.certificate_id }}</strong>
-</div>
+
 
 <div class="cert-wrapper">
   {% set img_url = cert.image_url %}
