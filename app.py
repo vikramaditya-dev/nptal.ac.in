@@ -1,5 +1,4 @@
 import os
-import sqlite3
 import uuid
 import io
 import random
@@ -12,6 +11,8 @@ from utils.qr_generator import generate_qr_image
 
 import cloudinary
 import cloudinary.uploader
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
 app = Flask(__name__)
 app.config.from_object(Config)
@@ -30,30 +31,31 @@ os.makedirs(app.config['CERT_FOLDER'], exist_ok=True)
 os.makedirs(app.config['QR_FOLDER'],   exist_ok=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  DATABASE
+#  DATABASE  (PostgreSQL via Supabase)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def get_db():
-    conn = sqlite3.connect(app.config['DATABASE'])
-    conn.row_factory = sqlite3.Row
+    conn = psycopg2.connect(app.config['DATABASE_URL'], cursor_factory=RealDictCursor)
     return conn
 
 def init_db():
     conn = get_db()
-    conn.execute("""
+    cur  = conn.cursor()
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS certificates (
-            id             INTEGER   PRIMARY KEY AUTOINCREMENT,
-            certificate_id TEXT      NOT NULL UNIQUE,
-            student_name   TEXT      NOT NULL,
-            course_name    TEXT      NOT NULL,
-            score          TEXT      NOT NULL,
-            issue_date     TEXT      NOT NULL,
-            image_url      TEXT      NOT NULL,
-            qr_url         TEXT      NOT NULL,
-            created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            id             SERIAL      PRIMARY KEY,
+            certificate_id TEXT        NOT NULL UNIQUE,
+            student_name   TEXT        NOT NULL,
+            course_name    TEXT        NOT NULL,
+            score          TEXT        NOT NULL,
+            issue_date     TEXT        NOT NULL,
+            image_url      TEXT        NOT NULL,
+            qr_url         TEXT        NOT NULL,
+            created_at     TIMESTAMP   DEFAULT CURRENT_TIMESTAMP
         )
     """)
     conn.commit()
+    cur.close()
     conn.close()
 
 with app.app_context():
@@ -70,12 +72,6 @@ def generate_certificate_id():
     """
     NPTEL-style ID — no dashes, one long string.
     Example: SPAI26CS35S55050626404989372
-        SPAI        = organisation prefix
-        26          = 2-digit year
-        CS35        = 4-char random course code
-        S55         = 3-char random section code
-        050626      = issue date DDMMYY
-        404989372   = 9-digit random serial
     """
     yy          = str(date.today().year)[2:]
     course_code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
@@ -133,9 +129,12 @@ def admin_required(f):
 @app.route('/admin')
 @admin_required
 def admin_dashboard():
-    db = get_db()
-    certs = db.execute("SELECT * FROM certificates ORDER BY id DESC").fetchall()
-    db.close()
+    conn = get_db()
+    cur  = conn.cursor()
+    cur.execute("SELECT * FROM certificates ORDER BY id DESC")
+    certs = cur.fetchall()
+    cur.close()
+    conn.close()
     return render_template('dashboard.html', certs=certs)
 
 # ── Add Certificate ───────────────────────────────────────────────────────────
@@ -162,28 +161,29 @@ def add_certificate():
         ext       = file.filename.rsplit('.', 1)[1].lower()
         public_id = f"cert_{cert_id}"
 
-        # 1. Upload certificate file to Cloudinary
+        # 1. Upload certificate to Cloudinary
         resource_type = 'raw' if ext == 'pdf' else 'image'
         image_url = upload_to_cloudinary(file.stream, public_id, resource_type)
 
-        # 2. QR points to /noc/E_Certificate/<cert_id>
-        cert_url = f"{app.config['BASE_URL']}/noc/E_Certificate/{cert_id}"
-        qr_image = generate_qr_image(cert_url)
-
+        # 2. Generate QR → upload to Cloudinary
+        cert_url  = f"{app.config['BASE_URL']}/noc/E_Certificate/{cert_id}"
+        qr_image  = generate_qr_image(cert_url)
         qr_buffer = io.BytesIO()
         qr_image.save(qr_buffer, format='PNG')
         qr_buffer.seek(0)
         qr_url = upload_to_cloudinary(qr_buffer, f"qr_{cert_id}", 'image')
 
-        # 3. Save to DB
-        db = get_db()
-        db.execute("""
+        # 3. Save to PostgreSQL
+        conn = get_db()
+        cur  = conn.cursor()
+        cur.execute("""
             INSERT INTO certificates
               (certificate_id, student_name, course_name, score, issue_date, image_url, qr_url)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
         """, (cert_id, student_name, course_name, score, issue_date, image_url, qr_url))
-        db.commit()
-        db.close()
+        conn.commit()
+        cur.close()
+        conn.close()
 
         flash(f'Certificate {cert_id} created successfully!', 'success')
         return redirect(url_for('admin_dashboard'))
@@ -195,19 +195,21 @@ def add_certificate():
 @app.route('/admin/delete/<certificate_id>', methods=['POST'])
 @admin_required
 def delete_certificate(certificate_id):
-    db = get_db()
-    cert = db.execute(
-        "SELECT * FROM certificates WHERE certificate_id = ?", (certificate_id,)
-    ).fetchone()
+    conn = get_db()
+    cur  = conn.cursor()
+    cur.execute("SELECT * FROM certificates WHERE certificate_id = %s", (certificate_id,))
+    cert = cur.fetchone()
 
     if not cert:
-        db.close()
+        cur.close()
+        conn.close()
         flash('Certificate not found.', 'error')
         return redirect(url_for('admin_dashboard'))
 
-    db.execute("DELETE FROM certificates WHERE certificate_id = ?", (certificate_id,))
-    db.commit()
-    db.close()
+    cur.execute("DELETE FROM certificates WHERE certificate_id = %s", (certificate_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
 
     try:
         cloudinary.uploader.destroy(f"certificates/cert_{certificate_id}")
@@ -218,22 +220,23 @@ def delete_certificate(certificate_id):
     flash(f'Certificate {certificate_id} deleted successfully.', 'success')
     return redirect(url_for('admin_dashboard'))
 
-# ── View Certificate  →  NPTEL-style path: /noc/E_Certificate/<id> ────────────
+# ── View Certificate — NPTEL-style URL ───────────────────────────────────────
 
 @app.route('/noc/E_Certificate/<certificate_id>')
 def view_certificate(certificate_id):
-    db   = get_db()
-    cert = db.execute(
-        "SELECT * FROM certificates WHERE certificate_id = ?", (certificate_id,)
-    ).fetchone()
-    db.close()
+    conn = get_db()
+    cur  = conn.cursor()
+    cur.execute("SELECT * FROM certificates WHERE certificate_id = %s", (certificate_id,))
+    cert = cur.fetchone()
+    cur.close()
+    conn.close()
 
     if not cert:
         return render_template('not_found.html'), 404
 
     return render_template('certificate.html', cert=cert)
 
-# ── Legacy redirects so old QR codes / links never break ─────────────────────
+# ── Legacy redirects ──────────────────────────────────────────────────────────
 @app.route('/certificate/<certificate_id>')
 @app.route('/verify/<certificate_id>')
 def view_certificate_legacy(certificate_id):
