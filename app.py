@@ -5,7 +5,6 @@ import random
 import string
 from datetime import date
 from flask import Flask, render_template, request, redirect, url_for, flash, session
-from werkzeug.utils import secure_filename
 from config import Config
 from utils.qr_generator import generate_qr_image
 
@@ -19,7 +18,6 @@ app.config.from_object(Config)
 
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'pdf'}
 
-# ── Cloudinary ────────────────────────────────────────────────────────────────
 cloudinary.config(
     cloud_name = app.config['CLOUDINARY_CLOUD_NAME'],
     api_key    = app.config['CLOUDINARY_API_KEY'],
@@ -31,33 +29,45 @@ os.makedirs(app.config['CERT_FOLDER'], exist_ok=True)
 os.makedirs(app.config['QR_FOLDER'],   exist_ok=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  DATABASE  (PostgreSQL via Supabase)
+#  DATABASE
 # ─────────────────────────────────────────────────────────────────────────────
 
 def get_db():
-    conn = psycopg2.connect(app.config['DATABASE_URL'], cursor_factory=RealDictCursor)
+    url = app.config['DATABASE_URL']
+    # psycopg2 needs postgresql:// not postgres://
+    if url.startswith('postgres://'):
+        url = url.replace('postgres://', 'postgresql://', 1)
+    conn = psycopg2.connect(url, cursor_factory=RealDictCursor, 
+                            connect_timeout=10,
+                            sslmode='require')
     return conn
 
 def init_db():
-    conn = get_db()
-    cur  = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS certificates (
-            id             SERIAL      PRIMARY KEY,
-            certificate_id TEXT        NOT NULL UNIQUE,
-            student_name   TEXT        NOT NULL,
-            course_name    TEXT        NOT NULL,
-            score          TEXT        NOT NULL,
-            issue_date     TEXT        NOT NULL,
-            image_url      TEXT        NOT NULL,
-            qr_url         TEXT        NOT NULL,
-            created_at     TIMESTAMP   DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.commit()
-    cur.close()
-    conn.close()
+    try:
+        conn = get_db()
+        cur  = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS certificates (
+                id             SERIAL      PRIMARY KEY,
+                certificate_id TEXT        NOT NULL UNIQUE,
+                student_name   TEXT        NOT NULL,
+                course_name    TEXT        NOT NULL,
+                score          TEXT        NOT NULL,
+                issue_date     TEXT        NOT NULL,
+                image_url      TEXT        NOT NULL,
+                qr_url         TEXT        NOT NULL,
+                created_at     TIMESTAMP   DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.commit()
+        cur.close()
+        conn.close()
+        print("✅ Database initialized successfully")
+    except Exception as e:
+        print(f"⚠️ Database init warning: {e}")
+        print("App will still start - DB will be initialized on first request")
 
+# Run init but don't crash if it fails
 with app.app_context():
     init_db()
 
@@ -69,10 +79,6 @@ def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 def generate_certificate_id():
-    """
-    NPTEL-style ID — no dashes, one long string.
-    Example: SPAI26CS35S55050626404989372
-    """
     yy          = str(date.today().year)[2:]
     course_code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
     section     = 'S' + ''.join(random.choices(string.digits, k=2))
@@ -90,6 +96,27 @@ def upload_to_cloudinary(file_stream, public_id, resource_type='image'):
     )
     return result['secure_url']
 
+def ensure_table():
+    """Create table if not exists — called before every DB operation."""
+    conn = get_db()
+    cur  = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS certificates (
+            id             SERIAL      PRIMARY KEY,
+            certificate_id TEXT        NOT NULL UNIQUE,
+            student_name   TEXT        NOT NULL,
+            course_name    TEXT        NOT NULL,
+            score          TEXT        NOT NULL,
+            issue_date     TEXT        NOT NULL,
+            image_url      TEXT        NOT NULL,
+            qr_url         TEXT        NOT NULL,
+            created_at     TIMESTAMP   DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+    cur.close()
+    return conn
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  ROUTES
 # ─────────────────────────────────────────────────────────────────────────────
@@ -97,8 +124,6 @@ def upload_to_cloudinary(file_stream, public_id, resource_type='image'):
 @app.route('/')
 def home():
     return redirect(url_for('admin_login'))
-
-# ── Login / Logout ────────────────────────────────────────────────────────────
 
 @app.route('/admin/login', methods=['GET', 'POST'])
 def admin_login():
@@ -124,8 +149,6 @@ def admin_required(f):
         return f(*args, **kwargs)
     return decorated
 
-# ── Dashboard ─────────────────────────────────────────────────────────────────
-
 @app.route('/admin')
 @admin_required
 def admin_dashboard():
@@ -136,8 +159,6 @@ def admin_dashboard():
     cur.close()
     conn.close()
     return render_template('dashboard.html', certs=certs)
-
-# ── Add Certificate ───────────────────────────────────────────────────────────
 
 @app.route('/admin/add', methods=['GET', 'POST'])
 @admin_required
@@ -161,11 +182,9 @@ def add_certificate():
         ext       = file.filename.rsplit('.', 1)[1].lower()
         public_id = f"cert_{cert_id}"
 
-        # 1. Upload certificate to Cloudinary
         resource_type = 'raw' if ext == 'pdf' else 'image'
         image_url = upload_to_cloudinary(file.stream, public_id, resource_type)
 
-        # 2. Generate QR → upload to Cloudinary
         cert_url  = f"{app.config['BASE_URL']}/noc/E_Certificate/{cert_id}"
         qr_image  = generate_qr_image(cert_url)
         qr_buffer = io.BytesIO()
@@ -173,7 +192,6 @@ def add_certificate():
         qr_buffer.seek(0)
         qr_url = upload_to_cloudinary(qr_buffer, f"qr_{cert_id}", 'image')
 
-        # 3. Save to PostgreSQL
         conn = get_db()
         cur  = conn.cursor()
         cur.execute("""
@@ -189,8 +207,6 @@ def add_certificate():
         return redirect(url_for('admin_dashboard'))
 
     return render_template('add_certificate.html')
-
-# ── Delete Certificate ────────────────────────────────────────────────────────
 
 @app.route('/admin/delete/<certificate_id>', methods=['POST'])
 @admin_required
@@ -220,8 +236,6 @@ def delete_certificate(certificate_id):
     flash(f'Certificate {certificate_id} deleted successfully.', 'success')
     return redirect(url_for('admin_dashboard'))
 
-# ── View Certificate — NPTEL-style URL ───────────────────────────────────────
-
 @app.route('/noc/E_Certificate/<certificate_id>')
 def view_certificate(certificate_id):
     conn = get_db()
@@ -236,15 +250,12 @@ def view_certificate(certificate_id):
 
     return render_template('certificate.html', cert=cert)
 
-# ── Legacy redirects ──────────────────────────────────────────────────────────
 @app.route('/certificate/<certificate_id>')
 @app.route('/verify/<certificate_id>')
 def view_certificate_legacy(certificate_id):
     return redirect(
         url_for('view_certificate', certificate_id=certificate_id), 301
     )
-
-# ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
     app.run(debug=True)
