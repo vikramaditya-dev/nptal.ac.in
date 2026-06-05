@@ -1,68 +1,108 @@
 import os
 import sqlite3
 import uuid
+import io
+import random
+import string
 from datetime import date
 from flask import Flask, render_template, request, redirect, url_for, flash, session
 from werkzeug.utils import secure_filename
 from config import Config
-from utils.qr_generator import generate_qr
+from utils.qr_generator import generate_qr_image
+
+import cloudinary
+import cloudinary.uploader
 
 app = Flask(__name__)
 app.config.from_object(Config)
 
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'pdf'}
 
-# Ensure folders exist
-os.makedirs(app.config['CERT_FOLDER'], exist_ok=True)
-os.makedirs(app.config['QR_FOLDER'], exist_ok=True)
+# ── Cloudinary ────────────────────────────────────────────────────────────────
+cloudinary.config(
+    cloud_name = app.config['CLOUDINARY_CLOUD_NAME'],
+    api_key    = app.config['CLOUDINARY_API_KEY'],
+    api_secret = app.config['CLOUDINARY_API_SECRET'],
+    secure     = True
+)
 
-# ---------------- DATABASE CONNECTION ---------------- #
+os.makedirs(app.config['CERT_FOLDER'], exist_ok=True)
+os.makedirs(app.config['QR_FOLDER'],   exist_ok=True)
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  DATABASE
+# ─────────────────────────────────────────────────────────────────────────────
 
 def get_db():
     conn = sqlite3.connect(app.config['DATABASE'])
-    conn.row_factory = sqlite3.Row  # Dict-like access to rows
+    conn.row_factory = sqlite3.Row
     return conn
 
 def init_db():
-    """Initialize the SQLite database with required tables if they don't exist."""
     conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("""
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS certificates (
-            id             INTEGER PRIMARY KEY AUTOINCREMENT,
-            certificate_id TEXT    NOT NULL UNIQUE,
-            student_name   TEXT    NOT NULL,
-            course_name    TEXT    NOT NULL,
-            score          TEXT    NOT NULL,
-            issue_date     TEXT    NOT NULL,
-            image_path     TEXT    NOT NULL,
+            id             INTEGER   PRIMARY KEY AUTOINCREMENT,
+            certificate_id TEXT      NOT NULL UNIQUE,
+            student_name   TEXT      NOT NULL,
+            course_name    TEXT      NOT NULL,
+            score          TEXT      NOT NULL,
+            issue_date     TEXT      NOT NULL,
+            image_url      TEXT      NOT NULL,
+            qr_url         TEXT      NOT NULL,
             created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
     conn.commit()
     conn.close()
 
-# Auto-initialize DB on startup
 with app.app_context():
     init_db()
 
-# ---------------- HELPERS ---------------- #
+# ─────────────────────────────────────────────────────────────────────────────
+#  HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 def generate_certificate_id():
-    year = date.today().year
-    unique = uuid.uuid4().hex[:6].upper()
-    return f"SPAI{year}-{unique}"
+    """
+    NPTEL-style ID — no dashes, one long string.
+    Example: SPAI26CS35S55050626404989372
+        SPAI        = organisation prefix
+        26          = 2-digit year
+        CS35        = 4-char random course code
+        S55         = 3-char random section code
+        050626      = issue date DDMMYY
+        404989372   = 9-digit random serial
+    """
+    yy          = str(date.today().year)[2:]
+    course_code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
+    section     = 'S' + ''.join(random.choices(string.digits, k=2))
+    datestamp   = date.today().strftime('%d%m%y')
+    serial      = ''.join(random.choices(string.digits, k=9))
+    return f"SPAI{yy}{course_code}{section}{datestamp}{serial}"
 
-# ---------------- HOME ---------------- #
+def upload_to_cloudinary(file_stream, public_id, resource_type='image'):
+    result = cloudinary.uploader.upload(
+        file_stream,
+        public_id     = public_id,
+        resource_type = resource_type,
+        overwrite     = True,
+        folder        = "certificates"
+    )
+    return result['secure_url']
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  ROUTES
+# ─────────────────────────────────────────────────────────────────────────────
 
 @app.route('/')
 def home():
     return redirect(url_for('admin_login'))
 
-# ---------------- ADMIN LOGIN ---------------- #
+# ── Login / Logout ────────────────────────────────────────────────────────────
 
 @app.route('/admin/login', methods=['GET', 'POST'])
 def admin_login():
@@ -79,8 +119,6 @@ def admin_logout():
     session.clear()
     return redirect(url_for('admin_login'))
 
-# ---------------- ADMIN ACCESS CONTROL ---------------- #
-
 def admin_required(f):
     from functools import wraps
     @wraps(f)
@@ -90,19 +128,17 @@ def admin_required(f):
         return f(*args, **kwargs)
     return decorated
 
-# ---------------- DASHBOARD ---------------- #
+# ── Dashboard ─────────────────────────────────────────────────────────────────
 
 @app.route('/admin')
 @admin_required
 def admin_dashboard():
     db = get_db()
-    cursor = db.cursor()
-    cursor.execute("SELECT * FROM certificates ORDER BY id DESC")
-    certs = cursor.fetchall()
+    certs = db.execute("SELECT * FROM certificates ORDER BY id DESC").fetchall()
     db.close()
     return render_template('dashboard.html', certs=certs)
 
-# ---------------- ADD CERTIFICATE ---------------- #
+# ── Add Certificate ───────────────────────────────────────────────────────────
 
 @app.route('/admin/add', methods=['GET', 'POST'])
 @admin_required
@@ -122,34 +158,30 @@ def add_certificate():
             flash('Allowed file types: PNG, JPG, JPEG, PDF', 'error')
             return redirect(request.url)
 
-        cert_id = generate_certificate_id()
+        cert_id   = generate_certificate_id()
+        ext       = file.filename.rsplit('.', 1)[1].lower()
+        public_id = f"cert_{cert_id}"
 
-        filename = secure_filename(f"{cert_id}_{file.filename}")
-        img_path = os.path.join(app.config['CERT_FOLDER'], filename)
-        file.save(img_path)
+        # 1. Upload certificate file to Cloudinary
+        resource_type = 'raw' if ext == 'pdf' else 'image'
+        image_url = upload_to_cloudinary(file.stream, public_id, resource_type)
 
-        # Public URL for QR
-        cert_url = f"{app.config['BASE_URL']}/certificate/{cert_id}"
+        # 2. QR points to /noc/E_Certificate/<cert_id>
+        cert_url = f"{app.config['BASE_URL']}/noc/E_Certificate/{cert_id}"
+        qr_image = generate_qr_image(cert_url)
 
-        qr_filename = f"{cert_id}.png"
-        qr_path = os.path.join(app.config['QR_FOLDER'], qr_filename)
-        generate_qr(cert_url, qr_path)
+        qr_buffer = io.BytesIO()
+        qr_image.save(qr_buffer, format='PNG')
+        qr_buffer.seek(0)
+        qr_url = upload_to_cloudinary(qr_buffer, f"qr_{cert_id}", 'image')
 
+        # 3. Save to DB
         db = get_db()
-        cursor = db.cursor()
-        cursor.execute("""
+        db.execute("""
             INSERT INTO certificates
-            (certificate_id, student_name, course_name, score, issue_date, image_path)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (
-            cert_id,
-            student_name,
-            course_name,
-            score,
-            issue_date,
-            f"certificates/{filename}"
-        ))
-
+              (certificate_id, student_name, course_name, score, issue_date, image_url, qr_url)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (cert_id, student_name, course_name, score, issue_date, image_url, qr_url))
         db.commit()
         db.close()
 
@@ -158,55 +190,42 @@ def add_certificate():
 
     return render_template('add_certificate.html')
 
-# ---------------- DELETE CERTIFICATE ---------------- #
+# ── Delete Certificate ────────────────────────────────────────────────────────
 
 @app.route('/admin/delete/<certificate_id>', methods=['POST'])
 @admin_required
 def delete_certificate(certificate_id):
     db = get_db()
-    cursor = db.cursor()
-
-    cursor.execute(
-        "SELECT image_path FROM certificates WHERE certificate_id = ?",
-        (certificate_id,)
-    )
-    cert = cursor.fetchone()
+    cert = db.execute(
+        "SELECT * FROM certificates WHERE certificate_id = ?", (certificate_id,)
+    ).fetchone()
 
     if not cert:
         db.close()
         flash('Certificate not found.', 'error')
         return redirect(url_for('admin_dashboard'))
 
-    cursor.execute(
-        "DELETE FROM certificates WHERE certificate_id = ?",
-        (certificate_id,)
-    )
+    db.execute("DELETE FROM certificates WHERE certificate_id = ?", (certificate_id,))
     db.commit()
     db.close()
 
-    certificate_path = os.path.join(app.static_folder, cert['image_path'])
-    qr_path = os.path.join(app.config['QR_FOLDER'], f"{certificate_id}.png")
-
-    for path in (certificate_path, qr_path):
-        if os.path.exists(path):
-            os.remove(path)
+    try:
+        cloudinary.uploader.destroy(f"certificates/cert_{certificate_id}")
+        cloudinary.uploader.destroy(f"certificates/qr_{certificate_id}")
+    except Exception:
+        pass
 
     flash(f'Certificate {certificate_id} deleted successfully.', 'success')
     return redirect(url_for('admin_dashboard'))
 
-# ---------------- VIEW CERTIFICATE (QR Target) ---------------- #
+# ── View Certificate  →  NPTEL-style path: /noc/E_Certificate/<id> ────────────
 
-@app.route('/certificate/<certificate_id>')
+@app.route('/noc/E_Certificate/<certificate_id>')
 def view_certificate(certificate_id):
-    db = get_db()
-    cursor = db.cursor()
-
-    cursor.execute(
-        "SELECT * FROM certificates WHERE certificate_id = ?",
-        (certificate_id,)
-    )
-
-    cert = cursor.fetchone()
+    db   = get_db()
+    cert = db.execute(
+        "SELECT * FROM certificates WHERE certificate_id = ?", (certificate_id,)
+    ).fetchone()
     db.close()
 
     if not cert:
@@ -214,7 +233,15 @@ def view_certificate(certificate_id):
 
     return render_template('certificate.html', cert=cert)
 
-# ---------------- RUN APP ---------------- #
+# ── Legacy redirects so old QR codes / links never break ─────────────────────
+@app.route('/certificate/<certificate_id>')
+@app.route('/verify/<certificate_id>')
+def view_certificate_legacy(certificate_id):
+    return redirect(
+        url_for('view_certificate', certificate_id=certificate_id), 301
+    )
+
+# ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
     app.run(debug=True)

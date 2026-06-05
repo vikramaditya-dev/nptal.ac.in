@@ -12,65 +12,81 @@
   <table>
     <thead>
       <tr>
-        <th>Cert ID</th>
+        <th>Certificate ID</th>
         <th>Student</th>
         <th>Course</th>
         <th>Score</th>
-        <th>Issue Date</th>
-        <th>QR Code</th>
+        <th>Issued</th>
+        <th>QR</th>
         <th>Actions</th>
       </tr>
     </thead>
-
     <tbody>
       {% for c in certs %}
       <tr>
-        <td><span class="badge">{{ c.certificate_id }}</span></td>
+        <td>
+          <span class="badge" style="font-size:.68rem;word-break:break-all;">
+            {{ c.certificate_id }}
+          </span>
+          <br>
+          <small style="color:var(--muted);font-size:.62rem;word-break:break-all;">
+            /noc/E_Certificate/{{ c.certificate_id }}
+          </small>
+        </td>
         <td>{{ c.student_name }}</td>
         <td>{{ c.course_name }}</td>
         <td>{{ c.score }}</td>
         <td>{{ c.issue_date }}</td>
 
         <td>
-          <a href="{{ url_for('static', filename='qr/' ~ c.certificate_id ~ '.png') }}" target="_blank">
-            <img class="qr-thumb"
-                 src="{{ url_for('static', filename='qr/' ~ c.certificate_id ~ '.png') }}"
-                 alt="QR" />
+          <a href="{{ c.qr_url }}" target="_blank">
+            <img class="qr-thumb" src="{{ c.qr_url }}" alt="QR" />
           </a>
         </td>
 
-        <td>
+        <td style="white-space:nowrap;">
           <!-- VIEW -->
           <a href="{{ url_for('view_certificate', certificate_id=c.certificate_id) }}"
-             target="_blank" class="btn btn-accent btn-sm">
-            View
-          </a>
+             target="_blank" class="btn btn-accent btn-sm">View</a>
+
+          <!-- COPY LINK -->
+          <button class="btn btn-secondary btn-sm"
+                  onclick="copyLink('{{ request.host_url }}noc/E_Certificate/{{ c.certificate_id }}', this)">
+            Copy Link
+          </button>
 
           <!-- DOWNLOAD QR -->
-          <a href="{{ url_for('static', filename='qr/' ~ c.certificate_id ~ '.png') }}"
-             download class="btn btn-secondary btn-sm">
-            QR
-          </a>
+          <a href="{{ c.qr_url }}" download class="btn btn-secondary btn-sm">QR ⬇</a>
 
           <!-- DELETE -->
           <form action="{{ url_for('delete_certificate', certificate_id=c.certificate_id) }}"
-                method="POST"
-                style="display:inline;"
+                method="POST" style="display:inline;"
                 onsubmit="return confirm('Delete this certificate permanently?');">
-
-            <button type="submit" class="btn btn-danger btn-sm">
-              Delete
-            </button>
+            <button type="submit" class="btn btn-danger btn-sm">Delete</button>
           </form>
-
         </td>
       </tr>
       {% endfor %}
     </tbody>
-
   </table>
   {% else %}
-  <p style="text-align:center; padding:2rem;">No certificates found.</p>
+  <p style="text-align:center;padding:2rem;">No certificates found. <a href="{{ url_for('add_certificate') }}">Add one now →</a></p>
   {% endif %}
 </div>
+
+<script>
+function copyLink(url, btn) {
+  navigator.clipboard.writeText(url).then(function() {
+    var orig = btn.textContent;
+    btn.textContent = '✅ Copied!';
+    btn.style.background = '#2e7d32';
+    btn.style.color = '#fff';
+    setTimeout(function() {
+      btn.textContent = orig;
+      btn.style.background = '';
+      btn.style.color = '';
+    }, 2000);
+  });
+}
+</script>
 {% endblock %}
